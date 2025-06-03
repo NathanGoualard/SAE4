@@ -7,9 +7,8 @@
       <div id="map"></div>
       <button class="geoloc-btn" @click="geolocaliser">Me localiser</button>
     </div>
-    
     <div v-if="RUselectionner" class="ru-info">
-      <h2>{{ RUselectionner.name }}</h2>
+      <h2>{{ RUselectionner.name || RUselectionner.titre }}</h2>
       <div v-if="RUselectionner.zone"><b>Zone :</b> {{ RUselectionner.zone }}</div>
       <div v-if="RUselectionner.region"><b>Région :</b> {{ RUselectionner.region }}</div>
       <div v-if="RUselectionner.description"><b>Description :</b> {{ RUselectionner.description }}</div>
@@ -28,8 +27,7 @@ import 'leaflet.markercluster'
 import 'leaflet.markercluster/dist/MarkerCluster.css'
 import 'leaflet.markercluster/dist/MarkerCluster.Default.css'
 
-let toutLesRU = []
-let markerCluster
+let markerCluster = null
 let map        
 let markerGeoloc = null
 const RUselectionner = ref(null)
@@ -43,47 +41,90 @@ const ruIcon = L.icon({
   shadowSize: [41, 41]
 })
 
-async function recuperationDeToutLesRU() {
-  let page = 1
-  const pageSize = 100
-  let toutLesRU = []
-  let total = null
-  do {
-    const reponse = await fetch(`http://localhost:1337/api/crousp?pagination[page]=${page}&pagination[pageSize]=${pageSize}`)
-    const data = await reponse.json()
-    if (total === null) total = data.meta.pagination.total
-    toutLesRU = toutLesRU.concat(data.data)
-    page++
-  } while (toutLesRU.length < total)
-  return toutLesRU
+const logementIcon = L.icon({
+  iconUrl: '/residenceCrous.png',
+  iconSize: [36, 36],
+  iconAnchor: [18, 36],
+  popupAnchor: [0, -36],
+  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+  shadowSize: [41, 41]
+});
+
+async function recuperationRUVisible(bounds) {
+  const sw = bounds.getSouthWest()
+  const ne = bounds.getNorthEast()
+  const minLat = Math.min(sw.lat, ne.lat)
+  const maxLat = Math.max(sw.lat, ne.lat)
+  const minLng = Math.min(sw.lng, ne.lng)
+  const maxLng = Math.max(sw.lng, ne.lng)
+  const url = `http://localhost:1337/api/crousp?filters[latitude][$gt]=${minLat}&filters[latitude][$lt]=${maxLat}&filters[longitude][$gt]=${minLng}&filters[longitude][$lt]=${maxLng}&pagination[pageSize]=1000`
+  const response = await fetch(url)
+  const data = await response.json()
+  return data.data
 }
 
-function afficherMarkersEtCluster(map) {
-  if (markerCluster) {
+async function fetchLogements(bounds) {
+  const sw = bounds.getSouthWest()
+  const ne = bounds.getNorthEast()
+  const minLat = Math.min(sw.lat, ne.lat)
+  const maxLat = Math.max(sw.lat, ne.lat)
+  const minLng = Math.min(sw.lng, ne.lng)
+  const maxLng = Math.max(sw.lng, ne.lng)
+  const url = `http://localhost:1337/api/logements?filters[latitude][$gt]=${minLat}&filters[latitude][$lt]=${maxLat}&filters[longitude][$gt]=${minLng}&filters[longitude][$lt]=${maxLng}&pagination[pageSize]=1000`
+  const response = await fetch(url)
+  const data = await response.json()
+  return data.data
+}
+
+// CLUSTER UNIQUE pour RU + logements
+async function afficherClusterUnique(map) {
+  // On enlève le cluster précédent
+  if (markerCluster && map.hasLayer(markerCluster)) {
     map.removeLayer(markerCluster)
   }
   markerCluster = L.markerClusterGroup()
   const bounds = map.getBounds()
+  // Récupérer les deux listes
+  const ruData = await recuperationRUVisible(bounds)
+  const logementData = await fetchLogements(bounds)
+  const seen = new Set()
+  // Ajoute tous les RU
+  ruData.forEach(resto => {
+    const attrs = resto.attributes || resto
+    const latitude = attrs.latitude
+    const longitude = attrs.longitude
+    const name = attrs.name
+    const zone = attrs.zone
+    const key = `${latitude},${longitude},${name}`
 
-  toutLesRU.forEach(resto => {
     if (
-      resto.latitude !== null &&
-      resto.latitude !== undefined &&
-      resto.longitude !== null &&
-      resto.longitude !== undefined
+      latitude !== null &&
+      latitude !== undefined &&
+      longitude !== null &&
+      longitude !== undefined &&
+      !seen.has(key)
     ) {
-      const latlng = L.latLng(resto.latitude, resto.longitude)
-      if (bounds.contains(latlng)) {
-
-        const marker = L.marker(latlng, { icon: ruIcon }).bindPopup(`<b>${resto.name}</b><br>${resto.zone || ''}`)
-        marker.on('click', () => {
-          RUselectionner.value = resto
-        })
-        markerCluster.addLayer(marker)
-      }
+      seen.add(key)
+      const marker = L.marker([latitude, longitude], { icon: ruIcon }).bindPopup(`<b>${name}</b><br>${zone || ''}`)
+      marker.on('click', () => { RUselectionner.value = attrs })
+      markerCluster.addLayer(marker)
     }
   })
+  // Ajoute tous les logements
+  logementData.forEach(lgt => {
+    const attrs = lgt.attributes || lgt
+    const lat = attrs.latitude
+    const lng = attrs.longitude
+    const titre = attrs.titre
+    const address = attrs.address
+    const key = `${lat},${lng},${titre}`
 
+    if (lat && lng && !seen.has(key)) {
+      seen.add(key)
+      const marker = L.marker([lat, lng], { icon: logementIcon }).bindPopup(`<b>${titre}</b><br>${address || ''}`)
+      markerCluster.addLayer(marker)
+    }
+  })
   map.addLayer(markerCluster)
 }
 
@@ -117,10 +158,14 @@ onMounted(async () => {
     attribution: '© OpenStreetMap contributors'
   }).addTo(map)
 
-  toutLesRU = await recuperationDeToutLesRU()
-  afficherMarkersEtCluster(map)
-  map.on('moveend', () => afficherMarkersEtCluster(map))
-  map.on('zoomend', () => afficherMarkersEtCluster(map))
+  await afficherClusterUnique(map)
+
+  map.on('moveend', async () => {
+    await afficherClusterUnique(map)
+  })
+  map.on('zoomend', async () => {
+    await afficherClusterUnique(map)
+  })
 
   geolocaliser()
 })
